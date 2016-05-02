@@ -2,6 +2,7 @@
 
 #include <allegro5/allegro.h>
 #include <allegro5/allegro_primitives.h>
+#include <allegro5/allegro_image.h>
 
 #include "../../lib/imgui/imgui.h"
 #include "imgui_impl_a5/imgui_impl_a5.h"

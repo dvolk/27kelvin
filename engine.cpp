@@ -2,6 +2,8 @@
 
 #include <vector>
 
+ImFont *bigger;
+
 Engine::Engine(const char *win_title, float win_sx, float win_sy) {
   title = win_title;
   sx = win_sx;
@@ -14,6 +16,7 @@ void Engine::init() {
   al_install_keyboard();
   al_install_mouse();
   al_init_primitives_addon();
+  al_init_image_addon();
   al_set_new_display_flags(ALLEGRO_RESIZABLE);
   display = al_create_display(sx, sy);
   al_set_window_title(display, title);
@@ -25,12 +28,16 @@ void Engine::init() {
   clear_color = ImColor(15, 15, 15);
   paused = false;
   running = true;
-  debug_win = false;
+  debug_win = true;
 
   // Setup ImGui binding
   ImGui_ImplA5_Init(display);
 
   resize_window();
+
+  ImGuiIO& io = ImGui::GetIO();
+  io.Fonts->AddFontFromFileTTF("DroidSans.ttf", 18.0);
+  bigger = io.Fonts->AddFontFromFileTTF("DroidSans.ttf", 22.0);
 
   frame = 0;
 }
