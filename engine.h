@@ -23,6 +23,7 @@ struct Engine {
   bool paused;
   bool running;
   bool debug_win;
+  bool draw_background;
 
   Engine(const char *win_title, float win_sx, float win_sy);
   void init();

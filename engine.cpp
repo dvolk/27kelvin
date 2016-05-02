@@ -8,6 +8,7 @@ Engine::Engine(const char *win_title, float win_sx, float win_sy) {
   title = win_title;
   sx = win_sx;
   sy = win_sy;
+  draw_background = true;
 }
 
 void Engine::init() {
