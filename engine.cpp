@@ -19,6 +19,8 @@ void Engine::init() {
   al_init_primitives_addon();
   al_init_image_addon();
   al_set_new_display_flags(ALLEGRO_RESIZABLE);
+  al_set_new_display_option(ALLEGRO_SAMPLE_BUFFERS, 1, ALLEGRO_SUGGEST);
+  al_set_new_display_option(ALLEGRO_SAMPLES, 16, ALLEGRO_SUGGEST);
   display = al_create_display(sx, sy);
   al_set_window_title(display, title);
   event_queue = al_create_event_queue();
@@ -66,14 +68,14 @@ void Engine::begin_frame() {
       Imgui_ImplA5_CreateDeviceObjects();
     }
     else if(ev.type == ALLEGRO_EVENT_KEY_DOWN) {
-      int key = ev.keyboard.keycode;
+      key = ev.keyboard.keycode;
       if(key == ALLEGRO_KEY_ESCAPE or key == ALLEGRO_KEY_Q) {
 	running = false;
       }
-      if(key == ALLEGRO_KEY_P) {
+      else if(key == ALLEGRO_KEY_P) {
 	paused ^= 1;
       }
-      if(key == ALLEGRO_KEY_D) {
+      else if(key == ALLEGRO_KEY_D) {
 	debug_win ^= 1;
       }
     }
@@ -86,9 +88,10 @@ void Engine::clear() {
 }
 
 void Engine::end_frame() {
+  key = -1;
   // Rendering
   ImGui::Render();
-     
+
   al_flip_display();
 }
 

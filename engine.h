@@ -16,6 +16,7 @@ struct Engine {
   float y_scale;
   float scale;
   int frame;
+  int key;
 
   ALLEGRO_DISPLAY *display;
   ALLEGRO_EVENT_QUEUE *event_queue;

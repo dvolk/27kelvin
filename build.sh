@@ -2,4 +2,4 @@
 
 #
 
-g++ -g3 -fsanitize=address -fsanitize=leak -fsanitize=undefined -Wall -Werror -Wno-sign-compare -std=c++14 engine.cpp main.cpp /home/dv/src/lib/imgui/imgui.o /home/dv/src/lib/imgui/imgui_draw.o imgui_impl_a5/imgui_impl_a5.o -o main -lallegro -lallegro_primitives -lallegro_image
+g++ -g3 -fsanitize=address -fsanitize=leak -fsanitize=undefined -Wall -Werror -Wno-sign-compare -std=c++17 engine.cpp main.cpp /home/dv/src/lib/imgui/imgui.o /home/dv/src/lib/imgui/imgui_draw.o imgui_impl_a5/imgui_impl_a5.o -o main -lallegro -lallegro_primitives -lallegro_image
