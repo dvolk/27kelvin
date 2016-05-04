@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <sstream>
 
 const float PX_PER_LIGHTYEAR = 50;
 const int TICKS_PER_SECOND = 2;
@@ -35,7 +36,7 @@ static inline float lerp(float v0, float v1, float t) {
 }
 
 struct Star {
-  const char *name;
+  char *name; // freed by struct Stars
   // star position
   float x, y;
   // imgui window offset for centering
@@ -46,7 +47,7 @@ struct Star {
   bool moving = false;
 
   Star(const char *_name, float _x, float _y) {
-    name = _name; x = _x; y = _y;
+    name = strdup(_name); x = _x; y = _y;
     owner = NULL;
   }
 
@@ -73,7 +74,6 @@ struct Star {
 
 	if(ImGui::Button("Connect")) {
 	  if(g_selected_star1 != NULL) {
-	    puts("conn?");
 	    g_selected_star2 = this;
 	  }
 	  else {
@@ -127,6 +127,10 @@ struct Star {
 
 struct StarGraph {
   std::vector<std::pair<Star *, Star *>> connections;
+
+  StarGraph() {
+    connections.reserve(64);
+  }
 
   void draw(float offx, float offy) {
     for(auto&& c : connections) {
@@ -260,7 +264,7 @@ struct Fleet {
     }
   }
 
-  void move_to(Star &d, Observations &obs);
+  void move_to(Star &d);
   void update();
 };
 
@@ -268,10 +272,16 @@ static inline const char *get_fleet_name(std::shared_ptr<Fleet> f) {
   return f->name;
 }
 
+struct Game;
+
 struct Fleets {
   int max_id = 0;
   std::vector<std::shared_ptr<Fleet>> fleets;
   std::mutex add_locker;
+
+  Fleets() {
+    fleets.reserve(128);
+  }
 
   void add(Fleet&& f) {
     add_locker.lock();
@@ -282,8 +292,7 @@ struct Fleets {
     add_locker.unlock();
   }
 
-  void observe(Observations &obs);
-  void update(Observations &obs);
+  void update(Observations &obs, Game &g);
 };
 
 struct Observer {
@@ -294,11 +303,90 @@ struct Observer {
   // These are *copies*
   std::vector<std::shared_ptr<Fleet>> known_travelling_fleets;
   std::vector<std::shared_ptr<Fleet>> known_idle_fleets;
+  std::vector<ObservableEvent> seen_events;
 
-  Observer(const char *_name, Star &h, ALLEGRO_COLOR c) {
+  Observer() {
+    known_travelling_fleets.reserve(64);
+    known_idle_fleets.reserve(64);
+    seen_events.reserve(128);
+  }
+
+  void add_event(const ObservableEvent &e) {
+    seen_events.push_back(e);
+  }
+  
+  bool has_seen(const ObservableEvent &e) {
+    for(auto&& seen_event : seen_events) {
+      if(strcmp(seen_event.name, e.name) == 0) { // TODO don't use string comparisons
+	return true;
+      }
+    }
+    return false;
+  }
+
+  void remove_event(ObservableEvent &e) {
+    auto it = seen_events.begin();
+    while(it != seen_events.end()) {
+      if(strcmp(it->name, e.name) == 0) { // TODO don't use string comparisons
+	seen_events.erase(it);
+	return;
+      }
+      it++;
+    }
+  }
+
+  Observer(const char *_name, Star& h, ALLEGRO_COLOR c) {
     name = _name;
     home = &h;
     color = c;
+  }
+};
+
+struct MessageLog {
+  std::vector<std::string> messages;
+  int year;
+
+  MessageLog() {
+    messages.reserve(32);
+    year = -1;
+  }
+
+  void addMessage(const char *m, bool with_year = true) {
+    std::stringstream ss;
+    if(with_year == true) {
+      ss << "Year " << year << " ";
+    }
+    ss << m;
+    messages.push_back(ss.str());
+  }
+
+  void addEventMessage(const ObservableEvent &event) {
+    static char buf[128];
+    switch(event.type)
+      {
+      case ObservableEventType::FleetDeparture:
+	{
+	  sprintf(buf, "%s departed from %s to %s", event.fleet1->name, event.orderTarget->name, event.orderMoveTo->name);
+	};
+	break;
+      case ObservableEventType::FleetArrival:
+	{
+	  sprintf(buf, "%s arrived at %s", event.fleet1->name, event.orderMoveTo->name);
+	};
+	break;
+      case ObservableEventType::CombatReport:
+	{
+	  sprintf(buf, "%s was destroyed at %s", event.fleet1->name, event.fleet1->source->name);
+	};
+	break;
+      default:
+	{
+	  return;
+	};
+	break;
+      }
+    printf("Log message: %s\n", buf);
+    addMessage(buf);
   }
 };
 
@@ -312,6 +400,12 @@ struct Observations {
   int event_counter;
   int idx = 0;
 
+  Observations() {
+    events.reserve(128);
+    order_add_queue.reserve(32);
+    observers.reserve(2);
+  }
+
   void addFleetDeparture(std::shared_ptr<Fleet> f) {
     char buf[32];
     sprintf(buf, "departure %d", idx);
@@ -320,7 +414,9 @@ struct Observations {
 
     auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetDeparture, f->x, f->y);
     printf("Fleet departure: %s, %s to %s\n", f->name, f->source->name, f->destination->name);
-    ev.fleet1 = f;
+    ev.fleet1 = std::make_shared<Fleet>(f.get());
+    ev.orderTarget = f->source;
+    ev.orderMoveTo = f->destination;
     order_add_queue.push_back(ev);
     event_counter++;
   }
@@ -332,8 +428,23 @@ struct Observations {
     idx++;
 
     auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetArrival, f->x, f->y);
-    printf("Fleet arrival: %s, %s from %s\n", f->name, f->destination->name, f->source->name);
-    ev.fleet1 = f;
+    printf("Fleet arrival: %s at %s\n", f->name, f->destination->name);
+    ev.fleet1 = std::make_shared<Fleet>(f.get());
+    ev.orderTarget = f->source;
+    ev.orderMoveTo = f->destination;
+    events.push_back(ev);
+    event_counter++;
+  }
+
+  void addFleetCombat(std::shared_ptr<Fleet> f) {
+    char buf[32];
+    sprintf(buf, "combat %d", idx);
+    puts(buf);
+    idx++;
+
+    auto ev = ObservableEvent(strdup(buf), ObservableEventType::CombatReport, f->x, f->y);
+    printf("Fleet combat: %s died at %s\n", f->name, f->source->name);
+    ev.fleet1 = std::make_shared<Fleet>(f.get());
     events.push_back(ev);
     event_counter++;
   }
@@ -347,7 +458,7 @@ struct Observations {
     float x = observers.front().home->x;
     float y = observers.front().home->y;
     auto ev = ObservableEvent(strdup(buf), ObservableEventType::OrderFleetMove, x, y);
-    ev.fleet1 = f;
+    ev.fleet1 = std::make_shared<Fleet>(f.get());
     ev.orderTarget = from;
     ev.orderMoveTo = to;
     ev.orderSender = o;
@@ -396,13 +507,16 @@ struct Observations {
     if(not orderReachedDestination(event)) {
       return false;
     }
+    if(observer.has_seen(event)) {
+      return true;
+    }
 
     std::shared_ptr<Fleet> f;
     bool present = orderTargetIsPresent(fleets, event, f);
 
     if(present == true) {
       printf("%s received order to move to %s\n", f->name, event.orderMoveTo->name);
-      f->move_to(*event.orderMoveTo, *this);
+      f->move_to(*event.orderMoveTo);
       addFleetDeparture(f);
       // RemoveFleetInVector(observer.known_idle_fleets, f);
       // RemoveFleetInVector(observer.known_travelling_fleets, f);
@@ -412,6 +526,8 @@ struct Observations {
     else {
       printf("order failed\n");
     }
+
+    observer.add_event(event);
     return true;
   }
 
@@ -425,7 +541,7 @@ struct Observations {
       }
       it++;
     }
-    printf("ugh\n");
+    printf("RemoveFleetInVector: false\n");
     return false;
   }
 
@@ -451,13 +567,16 @@ struct Observations {
       }
       it++;
     }
-    printf("ugh\n");
+    printf("RemoveFleetEventInVector: false\n");
     return false;
   }
 
-  bool processEvent(Observer& observer, ObservableEvent& event) {
+  bool processEvent(Observer& observer, ObservableEvent& event, MessageLog &log) {
     if(not eventReachedObserver(observer, event)) {
       return false;
+    }
+    if(observer.has_seen(event)) {
+      return true;
     }
 
     switch(event.type)
@@ -469,6 +588,9 @@ struct Observations {
 	    std::shared_ptr<Fleet> fleet_copy(new Fleet(event.fleet1.get()));
 	    observer.known_idle_fleets.push_back(fleet_copy);
 	    printf("Observer %s saw fleet \"%s\" arrive\n", observer.name, event.fleet1->name);
+	    if(&observer == human_controller) {
+	      log.addEventMessage(event);
+	    }
 	    RemoveFleetEventInVector(observer.known_travelling_fleets, event);
 	  }
 	};
@@ -481,9 +603,23 @@ struct Observations {
 	    std::shared_ptr<Fleet> fleet_copy(new Fleet(event.fleet1.get()));
 	    observer.known_travelling_fleets.push_back(fleet_copy);
 	    printf("Observer %s saw fleet \"%s\" depart\n", observer.name, event.fleet1->name);
+	    if(&observer == human_controller) {
+	      log.addEventMessage(event);
+	    }
 	    RemoveFleetEventInVector(observer.known_idle_fleets, event);
 	  }
 	};
+	break;
+
+      case ObservableEventType::CombatReport:
+	if(FleetEventInVector(observer.known_idle_fleets, event)) {
+	  // can the arrival event come after the combat report?
+	  printf("Observer %s saw fleet \"%s\" destroyed at %s\n", observer.name, event.fleet1->name, event.fleet1->source->name);
+	  if(&observer == human_controller) {
+	    log.addEventMessage(event);
+	  }
+	  RemoveFleetEventInVector(observer.known_idle_fleets, event);
+	}
 	break;
 
       default:
@@ -492,10 +628,11 @@ struct Observations {
 	break;
       }
 
+    observer.add_event(event);
     return true;
   }
 
-  void update(Fleets& fleets) {
+  void update(Fleets& fleets, MessageLog& log) {
     std::vector<ObservableEvent>::iterator it = events.begin();
 
     while(it != events.end()) {
@@ -516,7 +653,7 @@ struct Observations {
 	default:
 	  {
 	    for(auto&& observer : observers) {
-	      bool reached = processEvent(observer, event);
+	      bool reached = processEvent(observer, event, log);
 	      // other events propagate until they reach all observers
 	      erase_event = erase_event && reached;
 	    }
@@ -524,7 +661,11 @@ struct Observations {
 	  break;
 	}
 
-      if(erase_event == true) { free(event.name); it = events.erase(it); }
+      if(erase_event == true) {
+	for(auto&& observer : observers) { observer.remove_event(event); }
+	free(event.name);
+	it = events.erase(it);
+      }
       else { it++; }
     }
 
@@ -548,28 +689,6 @@ struct Observations {
   }
 };
 
-void Fleets::update(Observations &obs) {
-  for(auto&& fleet : fleets) {
-    fleet->update();
-
-    if(fleet->moving == false and fleet->t != 0) {
-      obs.addFleetArrival(fleet);
-      fleet->t = 0;
-    }
-  }
-  for(auto&& fleet : obs.human_controller->known_travelling_fleets) {
-    fleet->update();
-  }
-}
-
-void Fleets::observe(Observations &obs) {
-  // for(auto&& fleet : fleets) {
-  //   // if(fleet->destination == NULL) {
-  //   //   obs.addFleetIdle(fleet);
-  //   // }
-  // }
-}
-
 struct Stars {
   const size_t max_stars = 128;
   std::vector<Star> stars; // should really be pointers
@@ -577,9 +696,16 @@ struct Stars {
 
   ALLEGRO_BITMAP *circle_buf;
 
+  Stars() {
+    stars.reserve(64);
+  }
+  ~Stars() {
+    for(auto&& star : stars) { free(star.name); }
+  }
+
   void add(const char *name) {
     stars.push_back(Star(name, 0, 0));
-    printf("%d\n", stars.size());
+    printf("stars.size(): %ld\n", stars.size());
   }
 
   Star *from_name(const char *name) {
@@ -603,14 +729,14 @@ struct Stars {
 
     stars.reserve(max_stars);
 
-    stars.push_back(Star("Sol", 100, 100));
-    stars.push_back(Star("Procyon", 250, 0));
-    stars.push_back(Star("Epsilon Eridani", 400, 200));
-    stars.push_back(Star("Tau Ceti", 200, 150));
-    stars.push_back(Star("Lalande", 90, 250));
-    stars.push_back(Star("Alpha Centauri", -60, 130));
-    stars.push_back(Star("Ross 154", -130, 240));
-    stars.push_back(Star("Cygni", -70, -50));
+    stars.emplace_back(Star("Sol", 100, 100));
+    stars.emplace_back(Star("Procyon", 250, 0));
+    stars.emplace_back(Star("Epsilon Eridani", 400, 200));
+    stars.emplace_back(Star("Tau Ceti", 200, 150));
+    stars.emplace_back(Star("Lalande", 90, 250));
+    stars.emplace_back(Star("Alpha Centauri", -60, 130));
+    stars.emplace_back(Star("Ross 154", -130, 240));
+    stars.emplace_back(Star("Cygni", -70, -50));
     Star& sol = stars[0];
     Star& procyon = stars[1];
     Star& epsiloneridani = stars[2];
@@ -667,6 +793,7 @@ struct Game {
   const float scroll_speed = 3;
   bool fleet_window;
   bool settings_window;
+  bool log_window;
   int step;
   bool show_event_circles = true;
 
@@ -674,6 +801,7 @@ struct Game {
   float vx, vy;
 
   Engine* e;
+  MessageLog log;
 
   Stars stars;
   Observations obs;
@@ -686,6 +814,7 @@ struct Game {
     t = 3200;
     fleet_window = false;
     settings_window = false;
+    log_window = true;
     step = -1;
   }
 
@@ -728,6 +857,8 @@ struct Game {
 
     stars.from_name("Ross 154")->owner = &obs.observers[1];
     stars.from_name("Alpha Centauri")->owner = &obs.observers[1];
+
+    log.addMessage("Welcome to 2.7 Kelvin!", false);
   }
 
   void stuff() {
@@ -743,11 +874,18 @@ struct Game {
 	g_selected_fleet.reset();
       }
     }
+
     if(g_selected_star1 != NULL && g_selected_star2 != NULL) {
       printf("connecting %s - %s\n", g_selected_star1->name, g_selected_star2->name);
       stars.graph.connections.push_back(std::make_pair(g_selected_star1, g_selected_star2));
       g_selected_star1 = NULL;
       g_selected_star2 = NULL;
+    }
+
+    // don't draw the circles if we're not in 720x480 because that's the bitmap's size
+    // TODO fix that
+    if(e->sx != 720 && e->sy != 480) {
+      g_draw_influence_circles = false;
     }
   }
 
@@ -755,6 +893,8 @@ struct Game {
     switch(key)
       {
       case ALLEGRO_KEY_F:{ fleet_window ^= 1; }; break;
+      case ALLEGRO_KEY_L:{ log_window = 1; }; break;
+      case ALLEGRO_KEY_SPACE:
       case ALLEGRO_KEY_P:{ step = -1; }; break;
       case ALLEGRO_KEY_FULLSTOP: { step = 1; e->paused = true; }; break;
 	// case ALLEGRO_KEY_N:{ obs.next_observer(); }; break;
@@ -764,10 +904,27 @@ struct Game {
 
   void tick() {
     t++;
+    log.year = t;
     obs.event_counter = 0;
-    fleets.update(obs);
-    fleets.observe(obs);
-    obs.update(fleets);
+    fleets.update(obs, *this);
+    obs.update(fleets, log);
+  }
+
+  void fleetArrived(std::shared_ptr<Fleet> arrived)
+  {
+    std::vector<std::shared_ptr<Fleet>>::iterator it = fleets.fleets.begin();
+    while(it != fleets.fleets.end()) {
+      bool encounter = (*it)->t == 0 && arrived->id != (*it)->id && (*it)->source == arrived->source;
+      
+      if(encounter == true) {
+	printf("%s died at %s\n", (*it)->name, (*it)->source->name);
+	obs.addFleetCombat(*it);
+	it = fleets.fleets.erase(it);
+      }
+      else {
+	it++;
+      }
+    }
   }
 
   void draw() {
@@ -792,6 +949,8 @@ struct Game {
     if(ImGui::Button("Fleet")) { fleet_window ^= 1; }
     ImGui::SameLine();
     ImGui::Button("Diplomacy");
+    ImGui::SameLine();
+    if(ImGui::Button("Log")) { log_window ^= 1; }
     ImGui::SameLine();
     if(ImGui::Button("Debug")) { e->debug_win ^= 1; }
     int y = ImGui::GetWindowHeight();
@@ -818,6 +977,17 @@ struct Game {
       ImGui::SetNextWindowPos(ImVec2(5 + x2, 5 + y));
       ImGui::Begin("paused", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
       ImGui::Text("Paused");
+      ImGui::End();
+    }
+
+    if(log_window == true) {
+      ImGui::Begin("message log", &log_window, ImGuiWindowFlags_NoTitleBar);
+      ImGui::BeginChild("scrolling", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+      for(auto&& message : log.messages) {
+	ImGui::TextUnformatted(message.c_str());
+      }
+      ImGui::SetScrollHere(1.0f);
+      ImGui::EndChild();
       ImGui::End();
     }
 
@@ -925,8 +1095,35 @@ float distance_to_star(Observer *o, Star *s) {
 	 (s->y - o->home->y) * (s->y - o->home->y)) / PX_PER_LIGHTYEAR;
 }
 
+void Fleets::update(Observations &obs, Game &g) {
+  std::vector<std::weak_ptr<Fleet>> arrived_fleets;
 
-void Fleet::move_to(Star &d, Observations &obs) {
+  for(auto&& fleet : fleets) {
+    fleet->update();
+
+    if(fleet->moving == false and fleet->t != 0) {
+      obs.addFleetArrival(fleet);
+      fleet->t = 0;
+      arrived_fleets.push_back(fleet);
+    }
+  }
+
+  for(auto&& fleet : arrived_fleets) {
+    if(auto f = fleet.lock()) {
+      g.fleetArrived(f);
+    }
+  }
+
+  for(auto&& event : obs.events) {
+    event.fleet1->update();
+  }
+
+  for(auto&& fleet : obs.human_controller->known_travelling_fleets) {
+    fleet->update();
+  }
+}
+
+void Fleet::move_to(Star &d) {
   destination = &d;
   distance =
     sqrt((source->x - destination->x) * (source->x - destination->x) +
@@ -967,6 +1164,10 @@ void Fleet::update() {
     }
   }
 }
+
+// void Observations::dispatchMessages(const ObservableEvent& event, Game &g) {
+//   g.addEventMessage(event);
+// }
 
 static void show_debug_window(Engine &e, Game &g) {
   if(e.debug_win == true) {
