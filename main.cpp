@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <vector>
+#include <array>
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -13,14 +14,21 @@ struct Fleet;
 struct Star;
 
 bool g_draw_influence_circles = true;
-bool g_draw_fleet_traces = false;
+bool g_draw_fleet_traces = true;
+bool g_star_moving = true;
+bool g_star_connecting = false;
 std::weak_ptr<Fleet> g_selected_fleet;
-Star *g_selected_star = NULL;
+Star *g_selected_star1 = NULL;
+Star *g_selected_star2 = NULL;
 struct Observer;
 
 static inline const char *get_fleet_name(std::shared_ptr<Fleet> f);
 void add_fleet_buttons_for_obs(Star *s, Observer *o);
 float distance_to_star(Observer *o, Star *s);
+void connect_stars(Star *, Star *);
+
+ALLEGRO_COLOR c_steelblue;
+ALLEGRO_COLOR c_stars_bg;
 
 static inline float lerp(float v0, float v1, float t) {
   return (1 - t) * v0 + t * v1;
@@ -35,6 +43,7 @@ struct Star {
   float wy = 0;
   int focus = 0;
   Observer *owner;
+  bool moving = false;
 
   Star(const char *_name, float _x, float _y) {
     name = _name; x = _x; y = _y;
@@ -42,18 +51,52 @@ struct Star {
   }
 
   void draw(float offx, float offy, Observer *o) {
-    ImGui::SetNextWindowPos(ImVec2(x - offx - wx/2, y - offy - wy/2));
-    ImGui::Begin(name, NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize;
+    if(moving == false) {
+      flags = flags | ImGuiWindowFlags_NoMove;
+      ImGui::SetNextWindowPos(ImVec2(x - offx - wx/2, y - offy - wy/2));
+    }
+
+    ImGui::Begin(name, NULL, flags);
     bool pressed = ImGui::Button(name);
     if(pressed == true) {
-      if(auto f = g_selected_fleet.lock()) {
-	g_selected_star = this;
-      }
-      else {
+      if(not g_selected_fleet.lock()) {
 	ImGui::OpenPopup("star menu");
       }
+      else {
+	g_selected_star1 = this;
+      }
     }
+
     if(ImGui::BeginPopup("star menu")) {
+      if(g_star_moving == true) {
+
+	if(ImGui::Button("Connect")) {
+	  if(g_selected_star1 != NULL) {
+	    puts("conn?");
+	    g_selected_star2 = this;
+	  }
+	  else {
+	    g_selected_star1 = this;
+	  }
+	}
+
+	if(ImGui::Button("moving")) {
+	  moving = true;
+	}
+
+	if(moving == true) {
+	  ImGui::SameLine();
+	  if(ImGui::Button("Commit")) {
+	    moving = false;
+	    ImVec2 pos = ImGui::GetWindowPos();
+	    x = pos.x + offx;
+	    y = pos.y + offy;
+	    printf("%s moved to %f, %f\n", name, x, y);
+	  }
+	}
+      }
+
       ImGui::PushItemWidth(300);
       ImGui::Columns(2);
       ImGui::Text("%s             ", name);
@@ -127,6 +170,7 @@ struct ObservableEvent {
 };
 
 struct Observations;
+struct Observer;
 
 struct FleetTrace {
   FleetTrace(float _x, float _y, float _r) { x = _x; y = _y; r = _r; }
@@ -145,6 +189,8 @@ struct Fleet {
   Star *source;
   Star *destination;
 
+  Observer *owner;
+
   std::vector<FleetTrace> trace;
 
   const char *name;
@@ -162,9 +208,10 @@ struct Fleet {
     destination = other->destination;
     trace = other->trace;
     name = other->name;
+    owner = other->owner;
   }
 
-  Fleet(const char *_name, Star &s) {
+  Fleet(const char *_name, Star &s, Observer *_owner) {
     name = _name;
     source = &s;
     x = source->x;
@@ -172,6 +219,7 @@ struct Fleet {
     destination = source;
     t = -1;
     moving = false;
+    owner = _owner;
   }
 
   void draw(float offx, float offy) {
@@ -179,8 +227,8 @@ struct Fleet {
       al_draw_line(source->x - offx, source->y - offy, destination->x - offx, destination->y - offy, al_map_rgb(200, 20, 20), 3);
 
       for(auto&& t : trace) {
-	al_draw_circle(t.x - offx, t.y - offy, t.r * PX_PER_LIGHTYEAR, al_map_rgb(100, 100, 255), 2);
-	al_draw_filled_circle(t.x - offx, t.y - offy, 5, al_map_rgb(100, 100, 255));
+	al_draw_circle(t.x - offx, t.y - offy, t.r * PX_PER_LIGHTYEAR, c_steelblue, 2);
+	al_draw_filled_circle(t.x - offx, t.y - offy, 5, c_steelblue);
       }
 
       ImGui::SetNextWindowPos(ImVec2(x - offx - 20, y - offy - 20));
@@ -523,13 +571,37 @@ void Fleets::observe(Observations &obs) {
 }
 
 struct Stars {
-  std::vector<Star> stars;
+  const size_t max_stars = 128;
+  std::vector<Star> stars; // should really be pointers
   StarGraph graph;
+
   ALLEGRO_BITMAP *circle_buf;
+
+  void add(const char *name) {
+    stars.push_back(Star(name, 0, 0));
+    printf("%d\n", stars.size());
+  }
+
+  Star *from_name(const char *name) {
+    Star *ret = NULL;
+    for(auto&& star : stars) {
+      if(strcmp(star.name, name) == 0) {
+	ret = &star;
+	break;
+      }
+    }
+    return ret;
+  }
+
+  void connect(const char *name1, const char *name2) {
+    graph.connections.push_back(std::make_pair(from_name(name1), from_name(name2)));
+  }
 
   void init() {
     circle_buf = al_create_bitmap(720, 480);
     assert(circle_buf);
+
+    stars.reserve(max_stars);
 
     stars.push_back(Star("Sol", 100, 100));
     stars.push_back(Star("Procyon", 250, 0));
@@ -537,7 +609,7 @@ struct Stars {
     stars.push_back(Star("Tau Ceti", 200, 150));
     stars.push_back(Star("Lalande", 90, 250));
     stars.push_back(Star("Alpha Centauri", -60, 130));
-    stars.push_back(Star("Ross 154", -190, 270));
+    stars.push_back(Star("Ross 154", -130, 240));
     stars.push_back(Star("Cygni", -70, -50));
     Star& sol = stars[0];
     Star& procyon = stars[1];
@@ -582,7 +654,7 @@ struct Stars {
     graph.draw(vx, vy);
 
     for(auto&& fleet : o->known_idle_fleets) {
-      al_draw_filled_circle(fleet->source->x - vx, fleet->source->y - vy - 35, 10, fleet->source->owner->color);
+      al_draw_filled_circle(fleet->source->x - vx, fleet->source->y - vy - 35, 10, fleet->owner->color);
     }
   }
 };
@@ -634,53 +706,48 @@ struct Game {
   }
 
   void init() {
+    c_steelblue = al_map_rgb(70, 130, 180);
+    c_stars_bg = al_map_rgb(100, 255, 255);
+
     bg = al_load_bitmap("./bg.png");
     assert(bg);
 
     stars.init();
 
-    Star& sol = stars.stars[0];
-    // Star& procyon = stars.stars[1];
-    Star& epsiloneridani = stars.stars[2];
-    // Star& tauceti = stars.stars[3];
-    Star& lalande = stars.stars[4];
-    Star& ross154 = stars.stars[6];
-
-    obs.add(Observer("Dv", sol, al_map_rgb(100, 255, 255)));
-    obs.add(Observer("Xenos", ross154, al_map_rgb(255, 255, 100)));
+    obs.add(Observer("Dv", *stars.from_name("Epsilon Eridani"), al_map_rgb(100, 255, 255)));
+    obs.add(Observer("Xenos", *stars.from_name("Ross 154"), al_map_rgb(255, 255, 100)));
     obs.human_controller = &obs.observers.front();
+    Observer *xeno = &obs.observers[1];
 
-    fleets.add(Fleet("Epsilon Eridani Fleet", epsiloneridani));
-    std::shared_ptr<Fleet> fleet1 = fleets.fleets[0];
+    fleets.add(Fleet("Epsilon Eridani Fleet", *stars.from_name("Epsilon Eridani"), obs.human_controller));
+    fleets.add(Fleet("Lalande Fleet", *stars.from_name("Lalande"), obs.human_controller));
+    fleets.add(Fleet("Ross 154 Fleet", *stars.from_name("Ross 154"), xeno));
 
-    fleets.add(Fleet("Lalande Fleet", lalande));
-    std::shared_ptr<Fleet> fleet2 = fleets.fleets[1];
-    fleet2->velocity = 0.65;
+    stars.from_name("Epsilon Eridani")->owner = obs.human_controller;
+    stars.from_name("Procyon")->owner = obs.human_controller;
 
-    fleets.add(Fleet("Sol Fleet", sol));
-
-    stars.stars[0].owner = &obs.observers[0];
-    stars.stars[1].owner = &obs.observers[0];
-    stars.stars[2].owner = &obs.observers[0];
-    stars.stars[3].owner = &obs.observers[0];
-    stars.stars[4].owner = &obs.observers[0];
-    stars.stars[5].owner = &obs.observers[1];
-    stars.stars[6].owner = &obs.observers[1];
-    stars.stars[7].owner = &obs.observers[1];
+    stars.from_name("Ross 154")->owner = &obs.observers[1];
+    stars.from_name("Alpha Centauri")->owner = &obs.observers[1];
   }
 
   void stuff() {
     // move fleet if user has a fleet selected and clicked on a star
     if(auto f = g_selected_fleet.lock()) {
-      if(g_selected_star != NULL) {
+      if(g_selected_star1 != NULL) {
 
-	if(g_selected_star != f->source) {
-	  obs.addOrderFleetMove(f, f->source, g_selected_star, obs.human_controller);
+	if(g_selected_star1 != f->source) {
+	  obs.addOrderFleetMove(f, f->source, g_selected_star1, obs.human_controller);
 	}
 
-	g_selected_star = NULL;
+	g_selected_star1 = NULL;
 	g_selected_fleet.reset();
       }
+    }
+    if(g_selected_star1 != NULL && g_selected_star2 != NULL) {
+      printf("connecting %s - %s\n", g_selected_star1->name, g_selected_star2->name);
+      stars.graph.connections.push_back(std::make_pair(g_selected_star1, g_selected_star2));
+      g_selected_star1 = NULL;
+      g_selected_star2 = NULL;
     }
   }
 
@@ -822,10 +889,17 @@ struct Game {
 
     if(settings_window) {
       ImGui::Begin("Settings", &settings_window);
-      ImGui::Checkbox("Show Event Circles", &show_event_circles);
+      ImGui::Checkbox("Show event circles", &show_event_circles);
       ImGui::Checkbox("Draw background", &e->draw_background);
       ImGui::Checkbox("Draw fleet traces", &g_draw_fleet_traces);
       ImGui::Checkbox("Draw influence circles", &g_draw_influence_circles);
+      ImGui::Checkbox("Allow star movement", &g_star_moving);
+      ImGui::Separator();
+      static char buf[32] = "Star name";
+      ImGui::InputText("Star name", buf, 32);
+      if(ImGui::Button("Create")) {
+	stars.add(buf);
+      }
       ImGui::End();
     }
 
@@ -839,7 +913,7 @@ void add_fleet_buttons_for_obs(Star *s, Observer *o) {
     if(fleet->source == s) {
       if(ImGui::Button(get_fleet_name(fleet))) {
 	g_selected_fleet = fleet;
-	g_selected_star = NULL;
+	g_selected_star1 = NULL;
       }
     }
   }
@@ -963,7 +1037,6 @@ int main()
       e.frame++;
       if(e.frame % (60 / TICKS_PER_SECOND) == 0) {
 	g.tick();
-	printf("tick\n");
       }
       g.step--;
     }
