@@ -11,6 +11,7 @@
 const float PX_PER_LIGHTYEAR = 50;
 const int TICKS_PER_SECOND = 2;
 
+struct Observer;
 struct Fleet;
 struct Star;
 
@@ -18,10 +19,10 @@ bool g_draw_influence_circles = true;
 bool g_draw_fleet_traces = true;
 bool g_star_moving = true;
 bool g_star_connecting = false;
-std::weak_ptr<Fleet> g_selected_fleet;
 Star *g_selected_star1 = NULL;
 Star *g_selected_star2 = NULL;
-struct Observer;
+
+std::weak_ptr<Fleet> g_selected_fleet;
 
 static inline const char *get_fleet_name(std::shared_ptr<Fleet> f);
 void add_fleet_buttons_for_obs(Star *s, Observer *o);
@@ -49,6 +50,24 @@ struct Star {
   Star(const char *_name, float _x, float _y) {
     name = strdup(_name); x = _x; y = _y;
     owner = NULL;
+  }
+
+  Star(const Star * const other) {
+    name = other->name;
+    x = other->x;
+    y = other->y;
+    wx = other->wx;
+    wy = other->wy;
+    focus = other->focus;
+    owner = other->owner;
+    moving = other->moving;
+  }
+
+  void update() {
+  }
+
+  void set_full_owner(Observer *o) {
+    owner = o;
   }
 
   void draw(float offx, float offy, Observer *o) {
@@ -303,6 +322,7 @@ struct Observer {
   // These are *copies*
   std::vector<std::shared_ptr<Fleet>> known_travelling_fleets;
   std::vector<std::shared_ptr<Fleet>> known_idle_fleets;
+
   std::vector<ObservableEvent> seen_events;
 
   Observer() {
@@ -699,8 +719,13 @@ struct Stars {
   Stars() {
     stars.reserve(64);
   }
+
   ~Stars() {
     for(auto&& star : stars) { free(star.name); }
+  }
+
+  void update() {
+    for(auto&& star : stars) { star.update(); }
   }
 
   void add(const char *name) {
@@ -818,7 +843,7 @@ struct Game {
     step = -1;
   }
 
-  void handle_panning() {
+  void handle_panning(Engine &e) {
     al_get_keyboard_state(&keyboard);
     if(al_key_down(&keyboard, ALLEGRO_KEY_LEFT)) {
       vx -= scroll_speed;
@@ -831,6 +856,11 @@ struct Game {
     }
     else if(al_key_down(&keyboard, ALLEGRO_KEY_DOWN)) {
       vy += scroll_speed;
+    }
+    
+    if(e.mouse_btn_down) {
+      vx += round(e.mouse_dx * scroll_speed);
+      vy += round(e.mouse_dy * scroll_speed);
     }
   }
 
@@ -852,11 +882,11 @@ struct Game {
     fleets.add(Fleet("Lalande Fleet", *stars.from_name("Lalande"), obs.human_controller));
     fleets.add(Fleet("Ross 154 Fleet", *stars.from_name("Ross 154"), xeno));
 
-    stars.from_name("Epsilon Eridani")->owner = obs.human_controller;
-    stars.from_name("Procyon")->owner = obs.human_controller;
+    stars.from_name("Epsilon Eridani")->set_full_owner(obs.human_controller);
+    stars.from_name("Procyon")->set_full_owner(obs.human_controller);
 
-    stars.from_name("Ross 154")->owner = &obs.observers[1];
-    stars.from_name("Alpha Centauri")->owner = &obs.observers[1];
+    stars.from_name("Ross 154")->set_full_owner(&obs.observers[1]);
+    stars.from_name("Alpha Centauri")->set_full_owner(&obs.observers[1]);
 
     log.addMessage("Welcome to 2.7 Kelvin!", false);
   }
@@ -893,9 +923,9 @@ struct Game {
     switch(key)
       {
       case ALLEGRO_KEY_F:{ fleet_window ^= 1; }; break;
-      case ALLEGRO_KEY_L:{ log_window = 1; }; break;
-      case ALLEGRO_KEY_SPACE:
+      case ALLEGRO_KEY_L:{ log_window ^= 1; }; break;
       case ALLEGRO_KEY_P:{ step = -1; }; break;
+      case ALLEGRO_KEY_SPACE:{ step = -1; }; break;
       case ALLEGRO_KEY_FULLSTOP: { step = 1; e->paused = true; }; break;
 	// case ALLEGRO_KEY_N:{ obs.next_observer(); }; break;
       default: { }; break;
@@ -908,6 +938,7 @@ struct Game {
     obs.event_counter = 0;
     fleets.update(obs, *this);
     obs.update(fleets, log);
+    stars.update();
   }
 
   void fleetArrived(std::shared_ptr<Fleet> arrived)
@@ -917,13 +948,16 @@ struct Game {
       bool encounter = (*it)->t == 0 && arrived->id != (*it)->id && (*it)->source == arrived->source;
       
       if(encounter == true) {
-	printf("%s died at %s\n", (*it)->name, (*it)->source->name);
-	obs.addFleetCombat(*it);
-	it = fleets.fleets.erase(it);
+	bool is_enemy = (*it)->owner != arrived->owner;
+
+	if(is_enemy == true) {
+	  printf("%s died at %s\n", (*it)->name, (*it)->source->name);
+	  obs.addFleetCombat(*it);
+	  it = fleets.fleets.erase(it);
+	  continue;
+	}
       }
-      else {
-	it++;
-      }
+      it++;
     }
   }
 
@@ -946,22 +980,27 @@ struct Game {
     ImGui::SameLine();
     ImGui::Button("Research");
     ImGui::SameLine();
-    if(ImGui::Button("Fleet")) { fleet_window ^= 1; }
+    if(ImGui::Button("Fleets")) { fleet_window ^= 1; }
     ImGui::SameLine();
     ImGui::Button("Diplomacy");
     ImGui::SameLine();
-    if(ImGui::Button("Log")) { log_window ^= 1; }
+    if(ImGui::Button("Messages")) { log_window ^= 1; }
     ImGui::SameLine();
-    if(ImGui::Button("Debug")) { e->debug_win ^= 1; }
     int y = ImGui::GetWindowHeight();
     ImGui::SameLine();
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(0, 5 + y));
     ImGui::Begin("timekeeper", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
-    ImGui::Text("Year: %d ", t);
+    ImGui::Text("Year: %d", t);
     int y2 = ImGui::GetWindowHeight();
     int x2 = ImGui::GetWindowWidth();
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(5 + x2, 5 + y));
+    ImGui::Begin("resources", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
+    ImGui::Text("AP: 10");
+    x2 += ImGui::GetWindowWidth();
     ImGui::End();
 
     if(auto f = g_selected_fleet.lock()) {
@@ -974,7 +1013,7 @@ struct Game {
     ImGui::PopFont();
 
     if(e->paused == true) {
-      ImGui::SetNextWindowPos(ImVec2(5 + x2, 5 + y));
+      ImGui::SetNextWindowPos(ImVec2(2 * 5 + x2, 5 + y));
       ImGui::Begin("paused", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
       ImGui::Text("Paused");
       ImGui::End();
@@ -1216,7 +1255,7 @@ int main()
   while (e.running) {
     // TODO imgui clamps fps at 60?
     e.begin_frame();
-    g.handle_panning();
+    g.handle_panning(e);
     g.handle_key(e.key);
     g.draw();
 

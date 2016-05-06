@@ -17,6 +17,9 @@ struct Engine {
   float scale;
   int frame;
   int key;
+  int mouse_dx;
+  int mouse_dy;
+  bool mouse_btn_down;
 
   ALLEGRO_DISPLAY *display;
   ALLEGRO_EVENT_QUEUE *event_queue;

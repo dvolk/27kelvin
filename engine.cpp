@@ -31,7 +31,7 @@ void Engine::init() {
   clear_color = ImColor(15, 15, 15);
   paused = false;
   running = true;
-  debug_win = true;
+  debug_win = false;
 
   // Setup ImGui binding
   ImGui_ImplA5_Init(display);
@@ -54,6 +54,9 @@ void Engine::resize_window() {
 }
 
 void Engine::begin_frame() {
+  mouse_dx = 0;
+  mouse_dy = 0;
+  
   ALLEGRO_EVENT ev;
   while (al_get_next_event(event_queue, &ev)) {
     ImGui_ImplA5_ProcessEvent(&ev);
@@ -78,6 +81,16 @@ void Engine::begin_frame() {
       else if(key == ALLEGRO_KEY_D) {
 	debug_win ^= 1;
       }
+    }
+    else if(ev.type == ALLEGRO_EVENT_MOUSE_AXES) {
+      mouse_dx += ev.mouse.dx;
+      mouse_dy += ev.mouse.dy;
+    }
+    else if(ev.type == ALLEGRO_EVENT_MOUSE_BUTTON_DOWN) {
+      mouse_btn_down = true;
+    }
+    else if(ev.type == ALLEGRO_EVENT_MOUSE_BUTTON_UP) {
+      mouse_btn_down = false;
     }
   }
   ImGui_ImplA5_NewFrame();
