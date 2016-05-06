@@ -19,8 +19,8 @@ void Engine::init() {
   al_init_primitives_addon();
   al_init_image_addon();
   al_set_new_display_flags(ALLEGRO_RESIZABLE);
-  al_set_new_display_option(ALLEGRO_SAMPLE_BUFFERS, 1, ALLEGRO_SUGGEST);
-  al_set_new_display_option(ALLEGRO_SAMPLES, 16, ALLEGRO_SUGGEST);
+  al_set_new_display_option(ALLEGRO_SAMPLE_BUFFERS, 0, ALLEGRO_SUGGEST);
+  al_set_new_display_option(ALLEGRO_SAMPLES, 0, ALLEGRO_SUGGEST);
   display = al_create_display(sx, sy);
   al_set_window_title(display, title);
   event_queue = al_create_event_queue();
