@@ -28,6 +28,7 @@ static inline const char *get_fleet_name(std::shared_ptr<Fleet> f);
 void add_fleet_buttons_for_obs(Star *s, std::shared_ptr<Observer> o);
 float distance_to_star(std::shared_ptr<Observer> o, Star *s);
 std::shared_ptr<Star> star_from_name(const char *name);
+const char *get_observer_name(std::shared_ptr<Observer> o);
 
 ALLEGRO_COLOR c_steelblue;
 ALLEGRO_COLOR c_stars_bg;
@@ -37,6 +38,7 @@ static inline float lerp(float v0, float v1, float t) {
 }
 
 struct Star {
+  int id;
   char *name; // freed by struct Stars
   // star position
   float x, y;
@@ -47,8 +49,8 @@ struct Star {
   std::weak_ptr<Observer> owner;
   bool moving = false;
 
-  Star(const char *_name, float _x, float _y) {
-    name = strdup(_name); x = _x; y = _y;
+  Star(const char *_name, float _x, float _y, int _id) {
+    name = strdup(_name); x = _x; y = _y; id = _id;
   }
 
   void update() {
@@ -123,6 +125,12 @@ struct Star {
 	ImGui::Separator();
 	ImGui::Text("Distance: %.1fly", distance);
       }
+      if(auto o = owner.lock()) {
+	if(distance < 0.1) {
+	  ImGui::Separator();
+	}
+	ImGui::Text("Owner: %s", get_observer_name(o));
+      }
       ImGui::EndTooltip();
     }
 
@@ -151,7 +159,7 @@ struct StarGraph {
       s1 = c.first.lock();
       s2 = c.second.lock();
       if(s1 and s2) {
-	al_draw_line(s1->x - offx, s1->y - offy, s2->x - offx, s2->y - offy, al_map_rgb(255,255,255), 3);
+	al_draw_line(s1->x - offx, s1->y - offy, s2->x - offx, s2->y - offy, al_map_rgb(200,200,200), 2);
       }
     }
   }
@@ -180,8 +188,6 @@ struct StarGraph {
 /*
  * Other events?
  *
- *   combat report
- *
  *   observer requests general status report?
  *
  */
@@ -204,7 +210,6 @@ struct ObservableEvent {
   float x, y;
   float t;
 
-  // should really be a union, but isn't for $reasons
   std::shared_ptr<Observer> orderSender;
   std::shared_ptr<Star> orderTarget;
   std::shared_ptr<Star> orderMoveTo;
@@ -348,7 +353,14 @@ struct Observer {
   Observer() {
     known_travelling_fleets.reserve(64);
     known_idle_fleets.reserve(64);
+    known_stars.reserve(64);
     seen_events.reserve(128);
+  }
+
+  void add_stars(std::vector<std::shared_ptr<Star>> stars) {
+    for(auto&& star : stars) {
+      known_stars.push_back(std::make_shared<Star>(*star));
+    }
   }
 
   void add_event(const ObservableEvent &e) {
@@ -433,8 +445,8 @@ struct MessageLog {
 struct Observations {
   std::vector<ObservableEvent> events;
   std::vector<ObservableEvent> order_add_queue;
-  std::vector<std::shared_ptr<Observer>> observers;
 
+  std::vector<std::shared_ptr<Observer>> observers;
   std::shared_ptr<Observer> human_controller;
 
   int max_id = 0;
@@ -445,7 +457,26 @@ struct Observations {
   Observations() {
     events.reserve(128);
     order_add_queue.reserve(32);
-    observers.reserve(2);
+    observers.reserve(8);
+  }
+
+  void update_star_knowledge(Observer &observer, std::shared_ptr<Star> real_star) {
+    printf("update_star_knowledge: %s : %s\n", observer.name, real_star->name);
+    for(auto&& star : observer.known_stars) {
+      if(star->id == real_star->id) {
+	assert(strcmp(star->name, real_star->name) == 0);
+	float wx = star->wx;
+	float wy = star->wy;
+
+	star = real_star;
+
+	// the real star has never been drawn so these values weren't set
+	star->wx = wx;
+	star->wy = wy;
+	return;
+      }
+    }
+    assert(false);
   }
 
   void addFleetDeparture(std::shared_ptr<Fleet> f) {
@@ -536,16 +567,16 @@ struct Observations {
     return distance_squared <= wave_distance_squared;
   }
 
-  bool orderTargetIsPresent(Fleets &fleets, const ObservableEvent& event, std::shared_ptr<Fleet>& out) {
+  std::shared_ptr<Fleet> orderTargetIsPresent(Fleets &fleets, const ObservableEvent& event) {
+    std::shared_ptr<Fleet> ret;
     for(auto&& fleet : fleets.fleets) {
       if(fleet->id == event.fleet1->id) {
 	if(fleet->moving == false and fleet->destination == event.orderTarget and fleet->source == event.orderTarget) {
-	  out = fleet;
-	  return true;
+	  return fleet;
 	}
       }
     }
-    return false;
+    return NULL;
   }
 
   bool processOrder(Fleets &fleets, const ObservableEvent& event, Observer &observer) {
@@ -556,17 +587,12 @@ struct Observations {
       return true;
     }
 
-    std::shared_ptr<Fleet> f;
-    bool present = orderTargetIsPresent(fleets, event, f);
+    std::shared_ptr<Fleet> f = orderTargetIsPresent(fleets, event);
 
-    if(present == true) {
+    if(f) {
       printf("%s received order to move to %s\n", f->name, event.orderMoveTo->name);
       f->move_to(event.orderMoveTo);
       addFleetDeparture(f);
-      // RemoveFleetInVector(observer.known_idle_fleets, f);
-      // RemoveFleetInVector(observer.known_travelling_fleets, f);
-      // std::shared_ptr<Fleet> fleet_copy(new Fleet(f.get()));
-      // observer.known_travelling_fleets.push_back(fleet_copy);
     }
     else {
       printf("order failed\n");
@@ -632,6 +658,9 @@ struct Observations {
 	    // we haven't seen this even before
 	    std::shared_ptr<Fleet> fleet_copy(new Fleet(event.fleet1.get()));
 	    observer.known_idle_fleets.push_back(fleet_copy);
+	    if(observer.id == event.fleet1->owner.lock()->id) {
+	      update_star_knowledge(observer, event.fleet1->destination);
+	    }
 	    printf("Observer %s saw fleet \"%s\" arrive\n", observer.name, event.fleet1->name);
 	    if(observer.id == human_controller->id) {
 	      log.addEventMessage(event);
@@ -648,6 +677,9 @@ struct Observations {
 	    std::shared_ptr<Fleet> fleet_copy(new Fleet(event.fleet1.get()));
 	    observer.known_travelling_fleets.push_back(fleet_copy);
 	    printf("Observer %s saw fleet \"%s\" depart\n", observer.name, event.fleet1->name);
+	    if(observer.id == event.fleet1->owner.lock()->id) {
+	      update_star_knowledge(observer, event.orderTarget);
+	    }
 	    if(observer.id == human_controller->id) {
 	      log.addEventMessage(event);
 	    }
@@ -660,6 +692,9 @@ struct Observations {
 	if(FleetEventInVector(observer.known_idle_fleets, event)) {
 	  // can the arrival event come after the combat report?
 	  printf("Observer %s saw fleet \"%s\" destroyed at %s\n", observer.name, event.fleet1->name, event.fleet1->source->name);
+	  if(observer.id == event.fleet1->owner.lock()->id) {
+	    update_star_knowledge(observer, event.fleet1->source);
+	  }
 	  if(observer.id == human_controller->id) {
 	    log.addEventMessage(event);
 	  }
@@ -734,7 +769,12 @@ struct Observations {
   }
 };
 
+const char *get_observer_name(std::shared_ptr<Observer> o) {
+  return o->name;
+}
+
 struct Stars {
+  int max_id = 0;
   const size_t max_stars = 128;
   std::vector<std::shared_ptr<Star>> stars; // should really be pointers
   StarGraph graph;
@@ -758,7 +798,8 @@ struct Stars {
   }
 
   void add(const char *name, float _x, float _y) {
-    stars.push_back(std::make_shared<Star>(Star(name, _x, _y)));
+    stars.push_back(std::make_shared<Star>(Star(name, _x, _y, max_id)));
+    max_id++;
     printf("stars.size(): %ld\n", stars.size());
   }
 
@@ -818,7 +859,7 @@ struct Stars {
     if(g_draw_influence_circles) {
       al_set_target_bitmap(circle_buf);
       al_clear_to_color(al_map_rgb(0,0,0));
-      for(auto&& star : stars) {
+      for(auto&& star : o->known_stars) {
 	if(auto s = star->owner.lock()) {
 	  al_draw_filled_circle(star->x - vx, star->y - vy, 130, s->color);
 	}
@@ -827,9 +868,16 @@ struct Stars {
       const int i = 50;
       al_draw_tinted_bitmap(circle_buf, al_map_rgba(i, i, i , 10), 0, 0, 0);
     }
+    else {
+      for(auto&& star : o->known_stars) {
+	if(auto s = star->owner.lock()) {
+	  al_draw_filled_circle(star->x - vx, star->y - vy, star->wx/1.8, s->color);
+	}
+      }
+    }
 
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2, 0.2, 0.2, 1.0));
-    for(auto&& star : stars) {
+    for(auto&& star : o->known_stars) {
       star->draw(vx, vy, o);
     }
     ImGui::PopStyleColor();
@@ -838,10 +886,13 @@ struct Stars {
     for(auto&& fleet : o->known_idle_fleets) {
       if(auto f = fleet->owner.lock()) {
 	al_draw_filled_circle(fleet->source->x - vx, fleet->source->y - vy - 35, 10, f->color);
+	al_draw_circle(fleet->source->x - vx, fleet->source->y - vy - 35, 10, al_map_rgb(255, 255, 255), 2);
       }
     }
   }
 };
+
+void switch_to_menu();
 
 struct Game {
   ALLEGRO_KEYBOARD_STATE keyboard;
@@ -858,7 +909,7 @@ struct Game {
   // TODO should be in Engine?
   float vx, vy;
 
-  Engine* e;
+  Engine *e;
   MessageLog log;
 
   Stars stars;
@@ -892,9 +943,9 @@ struct Game {
       vy += scroll_speed;
     }
 
-    if(e.mouse_btn_down) {
-      vx += round(e.mouse_dx * scroll_speed);
-      vy += round(e.mouse_dy * scroll_speed);
+    if(e.mouse_btn_down and ImGui::IsAnyItemActive() == false) {
+      vx -= round(e.mouse_dx * scroll_speed);
+      vy -= round(e.mouse_dy * scroll_speed);
     }
   }
 
@@ -907,20 +958,26 @@ struct Game {
 
     stars.init();
 
-    obs.add(Observer("Dv", stars.from_name("Epsilon Eridani"), al_map_rgb(100, 255, 255)));
-    obs.add(Observer("Xenos", stars.from_name("Ross 154"), al_map_rgb(255, 255, 100)));
+    obs.add(Observer("Dv", stars.from_name("Epsilon Eridani"), al_map_rgb(143, 188, 143)));
+    obs.add(Observer("Xenos", stars.from_name("Ross 154"), al_map_rgb(72, 61, 139)));
+    // obs.add(Observer("Dv", stars.from_name("Epsilon Eridani"), al_map_rgb(255, 0, 0)));
+    // obs.add(Observer("Xenos", stars.from_name("Ross 154"), al_map_rgb(0, 0, 255)));
     obs.human_controller = obs.observers.front();
     std::shared_ptr<Observer> xeno = obs.observers[1];
-
-    fleets.add(Fleet("Epsilon Eridani Fleet", stars.from_name("Epsilon Eridani"), obs.human_controller));
-    fleets.add(Fleet("Lalande Fleet", stars.from_name("Lalande"), obs.human_controller));
-    fleets.add(Fleet("Ross 154 Fleet", stars.from_name("Ross 154"), xeno));
 
     stars.from_name("Epsilon Eridani")->set_full_owner(obs.human_controller);
     stars.from_name("Procyon")->set_full_owner(obs.human_controller);
 
-    stars.from_name("Ross 154")->set_full_owner(obs.observers[1]);
-    stars.from_name("Alpha Centauri")->set_full_owner(obs.observers[1]);
+    stars.from_name("Ross 154")->set_full_owner(xeno);
+    stars.from_name("Alpha Centauri")->set_full_owner(xeno);
+
+    obs.human_controller->add_stars(stars.stars);
+    xeno->add_stars(stars.stars);
+
+    fleets.add(Fleet("Epsilon Eridani Fleet", stars.from_name("Epsilon Eridani"), obs.human_controller));
+    fleets.add(Fleet("Lalande Fleet", stars.from_name("Lalande"), obs.human_controller));
+    fleets.add(Fleet("Ross 154 Fleet", stars.from_name("Ross 154"), xeno));
+    fleets.add(Fleet("Alpha Centauri Fleet", stars.from_name("Alpha Centauri"), xeno));
 
     log.addMessage("Welcome to 2.7 Kelvin!", false);
   }
@@ -965,6 +1022,14 @@ struct Game {
       case ALLEGRO_KEY_P:{ step = -1; }; break;
       case ALLEGRO_KEY_SPACE:{ step = -1; }; break;
       case ALLEGRO_KEY_FULLSTOP: { step = 1; e->paused = true; }; break;
+      case ALLEGRO_KEY_B: {
+	if(obs.human_controller == obs.observers[0]) {
+	  obs.human_controller = obs.observers[1];
+	}
+	else {
+	  obs.human_controller = obs.observers[0];
+	}
+      }; break;
 	// case ALLEGRO_KEY_N:{ obs.next_observer(); }; break;
       default: { }; break;
       }
@@ -977,6 +1042,7 @@ struct Game {
     fleets.update(obs, *this);
     obs.update(fleets, log);
     stars.update();
+    stars.graph.prune();
   }
 
   void fleetArrived(std::shared_ptr<Fleet> arrived)
@@ -1002,7 +1068,9 @@ struct Game {
 
   void draw() {
     if(e->draw_background) {
-      al_draw_scaled_bitmap(bg, 0, 0, 720, 480, 0, 0, e->sx, e->sy, 0);
+      if(bg) {
+	al_draw_scaled_bitmap(bg, 0, 0, 1280, 720, 0, 0, e->sx, e->sy, 0);
+      }
       // float i = 50;
       // al_draw_filled_rectangle(0, 0, e->sx, e->sy, al_map_rgba((i / 255) * 100, (i / 255) * 255, (i / 255) * 255, 30));
     }
@@ -1017,7 +1085,10 @@ struct Game {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::Begin("menu", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
-    if(ImGui::Button("Menu")) { settings_window ^= 1; }
+    if(ImGui::Button("Menu")) {
+      // switch_to_menu();
+      settings_window ^= 1;
+    }
     ImGui::SameLine();
     ImGui::Button("Research");
     ImGui::SameLine();
@@ -1026,21 +1097,19 @@ struct Game {
     ImGui::Button("Diplomacy");
     ImGui::SameLine();
     if(ImGui::Button("Messages")) { log_window ^= 1; }
-    ImGui::SameLine();
     int y = ImGui::GetWindowHeight();
-    ImGui::SameLine();
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(0, 5 + y));
     ImGui::Begin("timekeeper", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
-    ImGui::Text("Year: %d", t);
+    ImGui::Text("%d CE", t);
     int y2 = ImGui::GetWindowHeight();
     int x2 = ImGui::GetWindowWidth();
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(5 + x2, 5 + y));
     ImGui::Begin("resources", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove );
-    ImGui::Text("AP: 10");
+    ImGui::Text("10 AP");
     x2 += ImGui::GetWindowWidth();
     ImGui::End();
 
@@ -1160,7 +1229,7 @@ struct Game {
 
 void add_fleet_buttons_for_obs(Star *s, std::shared_ptr<Observer> o) {
   for(auto&& fleet : o->known_idle_fleets) {
-    if(fleet->source.get() == s) {
+    if(fleet->source->id == s->id) {
       if(ImGui::Button(get_fleet_name(fleet))) {
       	g_selected_fleet = fleet;
       	g_selected_star1.reset();
@@ -1281,28 +1350,93 @@ static void show_debug_window(Engine &e, Game &g) {
   }
 }
 
-Game g;
+struct UI {
+  virtual void draw() = 0;
+  virtual void update() = 0;
+};
 
-std::shared_ptr<Star> star_from_name(const char *name) {
-  return g.stars.from_name(name);
-}
+void switch_to_game();
 
-int main()
-{
-  Engine e("2.7 Kelvin", 720, 480);
-  e.init();
-  g.init(e, -220, -100);
-  g.init();
+struct TitleUI : public UI {
+  Engine *engine;
 
-  while (e.running) {
-    // TODO imgui clamps fps at 60?
-    e.begin_frame();
+  TitleUI(Engine *_e) { engine = _e; }
+
+  void update() override {
+    Engine& e = *engine;
+    e.clear();
+
+    static float angle = 0;
+    static float size = (M_PI / 2.0);
+    static float skip = (M_PI / 2.0) / 3.0;
+    static float r = 190;
+    const float thickness = 15;
+
+    al_draw_arc(1.5/3.0 * e.sx, e.sy / 2, r, angle + 0, size, c_steelblue, thickness);
+    al_draw_arc(1.5/3.0 * e.sx, e.sy / 2, r, angle + size + skip, size, c_steelblue, thickness);
+    al_draw_arc(1.5/3.0 * e.sx, e.sy / 2, r, angle + 2 * (size + skip), size, c_steelblue, thickness);
+    al_draw_filled_circle(e.sx / 2.0, e.sy / 2.0, r * 8/10.0, c_steelblue);
+
+    // ImGui::SliderFloat("size", &r, 0, 400);
+    // ImGui::SliderFloat("angle", &angle, 0, M_PI);
+
+    angle += 0.002;
+
+    extern ImFont* bigger;
+    ImGui::SetNextWindowPosCenter();
+    // ImGui::SetNextWindowSize(ImVec2(200, 350));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(69/255.0, 77/255.0, 87/255.0, 1.0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(50/255.0, 57/255.0, 77/255.0, 1.0));
+    ImGui::Begin("2.7 Kelvin", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    const ImVec2 sz = ImVec2(100, 40);
+    ImGui::PushFont(bigger);
+    if(ImGui::Button("New", sz)) {
+      switch_to_game();
+    }
+    ImGui::Button("Load", sz);
+    ImGui::Button("Save", sz);
+    ImGui::Button("Options", sz);
+    ImGui::Button("Help", sz);
+    if(ImGui::Button("Exit", sz)) {
+      e.running = false;
+    }
+    ImGui::PopFont();
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleVar();
+    e.end_frame();
+  }
+  void draw() {}
+};
+
+struct GameUI : public UI {
+  Game *game;
+
+  GameUI(Game* _g) {
+    game = _g;
+  }
+
+  void draw() override {
+    game->draw();
+  }
+
+  void update() override {
+    Game& g = *game;
+    Engine& e = *g.e;
+
     g.handle_panning(e);
     g.handle_key(e.key);
-    g.draw();
+
+    draw();
 
     show_debug_window(e, g);
+
     e.end_frame();
+
     g.stuff();
 
     // take step steps and then pause
@@ -1322,6 +1456,43 @@ int main()
       }
       g.step--;
     }
+  }
+};
+
+Game g;
+GameUI *gameUI = NULL;
+TitleUI *titleUI = NULL;
+UI *ui = NULL;
+
+std::shared_ptr<Star> star_from_name(const char *name) {
+  return g.stars.from_name(name);
+}
+
+void switch_to_game() {
+  ui = gameUI;
+}
+
+void switch_to_menu() {
+  ui = titleUI;
+  g.e->paused = true;
+}
+
+int main()
+{
+  Engine e("2.7 Kelvin", 1280, 720);
+  e.init();
+
+  g.init(e, -220, -100);
+  g.init();
+
+  gameUI = new GameUI(&g);
+  titleUI = new TitleUI(&e);
+  ui = titleUI;
+
+  while (e.running) {
+    // TODO imgui clamps fps at 60?
+    e.begin_frame();
+    ui->update();
   }
   e.stop();
 }
