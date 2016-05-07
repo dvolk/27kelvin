@@ -49,6 +49,7 @@ struct Star {
   std::weak_ptr<Observer> owner;
   bool moving = false;
 
+  // only used by struct Stars
   Star(const char *_name, float _x, float _y, int _id) {
     name = strdup(_name); x = _x; y = _y; id = _id;
   }
@@ -134,6 +135,7 @@ struct Star {
       ImGui::EndTooltip();
     }
 
+    // Is there a way to do this without the first frame being borked?
     wy = ImGui::GetWindowHeight();
     wx = ImGui::GetWindowWidth();
     ImGui::End();
@@ -197,7 +199,8 @@ enum class ObservableEventType { FleetDeparture, FleetArrival, FleetIdle, OrderF
 struct Fleet;
 
 struct ObservableEvent {
-  ObservableEvent(char *_name, ObservableEventType _type, float _x, float _y) {
+  ObservableEvent(char *_name, ObservableEventType _type, float _x, float _y, int _id) {
+    id = _id;
     type = _type;
     name = _name;
     x = _x;
@@ -205,6 +208,7 @@ struct ObservableEvent {
     t = 0;
   }
 
+  int id;
   char *name;
   ObservableEventType type;
   float x, y;
@@ -230,7 +234,6 @@ struct Fleet {
   float t; // -1 if in star system
   float velocity = 0.75;
   float distance;
-  int time_since_departure; // in years, presumably 1 update per year
   bool moving;
 
   std::shared_ptr<Star> source;
@@ -248,7 +251,6 @@ struct Fleet {
     t = other->t;
     velocity = other->velocity;
     distance = other->distance;
-    time_since_departure = other->time_since_departure;
     moving = other->moving;
     source = other->source;
     destination = other->destination;
@@ -369,7 +371,7 @@ struct Observer {
 
   bool has_seen(const ObservableEvent &e) {
     for(auto&& seen_event : seen_events) {
-      if(strcmp(seen_event.name, e.name) == 0) { // TODO don't use string comparisons
+      if(seen_event.id == e.id) {
 	return true;
       }
     }
@@ -379,7 +381,7 @@ struct Observer {
   void remove_event(ObservableEvent &e) {
     auto it = seen_events.begin();
     while(it != seen_events.end()) {
-      if(strcmp(it->name, e.name) == 0) { // TODO don't use string comparisons
+      if(it->id == e.id) {
 	seen_events.erase(it);
 	return;
       }
@@ -449,7 +451,8 @@ struct Observations {
   std::vector<std::shared_ptr<Observer>> observers;
   std::shared_ptr<Observer> human_controller;
 
-  int max_id = 0;
+  int max_observer_id = 0; // id's for Observers
+  int max_event_id = 0; // id's for ObservableEvents
 
   int event_counter;
   int idx = 0;
@@ -485,7 +488,8 @@ struct Observations {
     puts(buf);
     idx++;
 
-    auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetDeparture, f->x, f->y);
+    auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetDeparture, f->x, f->y, max_event_id);
+    max_event_id++;
     printf("Fleet departure: %s, %s to %s\n", f->name, f->source->name, f->destination->name);
     ev.fleet1 = std::make_shared<Fleet>(f.get());
     ev.orderTarget = f->source;
@@ -500,7 +504,8 @@ struct Observations {
     puts(buf);
     idx++;
 
-    auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetArrival, f->x, f->y);
+    auto ev = ObservableEvent(strdup(buf), ObservableEventType::FleetArrival, f->x, f->y, max_event_id);
+    max_event_id++;
     printf("Fleet arrival: %s at %s\n", f->name, f->destination->name);
     ev.fleet1 = std::make_shared<Fleet>(f.get());
     ev.orderTarget = f->source;
@@ -515,7 +520,8 @@ struct Observations {
     puts(buf);
     idx++;
 
-    auto ev = ObservableEvent(strdup(buf), ObservableEventType::CombatReport, f->x, f->y);
+    auto ev = ObservableEvent(strdup(buf), ObservableEventType::CombatReport, f->x, f->y, max_event_id);
+    max_event_id++;
     printf("Fleet combat: %s died at %s\n", f->name, f->source->name);
     ev.fleet1 = std::make_shared<Fleet>(f.get());
     events.push_back(ev);
@@ -531,7 +537,8 @@ struct Observations {
     float x = human_controller->home->x;
     float y = human_controller->home->y;
 
-    auto ev = ObservableEvent(strdup(buf), ObservableEventType::OrderFleetMove, x, y);
+    auto ev = ObservableEvent(strdup(buf), ObservableEventType::OrderFleetMove, x, y, max_event_id);
+    max_event_id++;
     ev.fleet1 = std::make_shared<Fleet>(f.get());
     ev.orderTarget = from;
     ev.orderMoveTo = to;
@@ -541,8 +548,8 @@ struct Observations {
   }
 
   void add(Observer&& o) {
-    o.id = max_id;
-    max_id++;
+    o.id = max_observer_id;
+    max_observer_id++;
     observers.emplace_back(std::make_shared<Observer>(o));
   }
 
@@ -776,7 +783,7 @@ const char *get_observer_name(std::shared_ptr<Observer> o) {
 struct Stars {
   int max_id = 0;
   const size_t max_stars = 128;
-  std::vector<std::shared_ptr<Star>> stars; // should really be pointers
+  std::vector<std::shared_ptr<Star>> stars;
   StarGraph graph;
 
   ALLEGRO_BITMAP *circle_buf;
@@ -906,7 +913,6 @@ struct Game {
   int step;
   bool show_event_circles = true;
 
-  // TODO should be in Engine?
   float vx, vy;
 
   Engine *e;
@@ -1030,7 +1036,6 @@ struct Game {
 	  obs.human_controller = obs.observers[0];
 	}
       }; break;
-	// case ALLEGRO_KEY_N:{ obs.next_observer(); }; break;
       default: { }; break;
       }
   }
@@ -1290,7 +1295,6 @@ void Fleet::update() {
 
   // travelling
   t += (velocity * PX_PER_LIGHTYEAR) / distance;
-  time_since_departure += 1;
 
   if(t >= 1) {
     // we've arrived
@@ -1314,10 +1318,6 @@ void Fleet::update() {
   }
 }
 
-// void Observations::dispatchMessages(const ObservableEvent& event, Game &g) {
-//   g.addEventMessage(event);
-// }
-
 static void show_debug_window(Engine &e, Game &g) {
   if(e.debug_win == true) {
     ImGui::Begin("Debug", &e.debug_win);
@@ -1326,11 +1326,6 @@ static void show_debug_window(Engine &e, Game &g) {
     ImGui::Text("Stars: %ld", g.stars.stars.size());
     ImGui::Text("Fleets: %ld", g.fleets.fleets.size());
     ImGui::Text("Observers: %ld", g.obs.observers.size());
-
-    // if(ImGui::TreeNode("Colored")) {
-    //   ImGui::Text("Hello");
-    //   ImGui::TreePop();
-    // }
 
     int i = 0;
 
@@ -1376,9 +1371,6 @@ struct TitleUI : public UI {
     al_draw_arc(1.5/3.0 * e.sx, e.sy / 2, r, angle + size + skip, size, c_steelblue, thickness);
     al_draw_arc(1.5/3.0 * e.sx, e.sy / 2, r, angle + 2 * (size + skip), size, c_steelblue, thickness);
     al_draw_filled_circle(e.sx / 2.0, e.sy / 2.0, r * 8/10.0, c_steelblue);
-
-    // ImGui::SliderFloat("size", &r, 0, 400);
-    // ImGui::SliderFloat("angle", &angle, 0, M_PI);
 
     angle += 0.002;
 
