@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <vector>
+#include <deque>
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -38,6 +39,7 @@ static inline float lerp(float v0, float v1, float t) {
 
 struct Star {
   int id;
+  int index; // index into the stars vector
   char *name; // freed by struct Stars
   // star position
   float x, y;
@@ -46,6 +48,7 @@ struct Star {
   float wy = 0;
   int focus = 0;
   std::weak_ptr<Observer> owner;
+  std::vector<std::weak_ptr<Star>> neighbors;
   bool moving = false;
 
   // only used by struct Stars
@@ -141,49 +144,21 @@ struct Star {
   }
 };
 
+struct Stars;
+
 struct StarGraph {
-  std::vector<std::pair<std::weak_ptr<Star>, std::weak_ptr<Star>>> connections;
+  Stars* s;
 
-  StarGraph() {
-    connections.reserve(64);
+  StarGraph() = default;
+  StarGraph(Stars* _s) {
+    s = _s;
   }
 
-  void add(std::shared_ptr<Star>& s1, std::shared_ptr<Star>& s2) {
-    connections.emplace_back(std::make_pair(s1, s2));
-  }
+  std::vector<std::weak_ptr<Star>> shown_path;
 
-  void draw(float offx, float offy) {
-    std::shared_ptr<Star> s1;
-    std::shared_ptr<Star> s2;
-
-    for(auto&& c : connections) {
-      s1 = c.first.lock();
-      s2 = c.second.lock();
-      if(s1 and s2) {
-	al_draw_line(s1->x - offx, s1->y - offy, s2->x - offx, s2->y - offy, al_map_rgb(200,200,200), 2);
-      }
-    }
-  }
-
-  void prune() {
-    std::shared_ptr<Star> s1;
-    std::shared_ptr<Star> s2;
-
-    auto it = connections.begin();
-
-    while(it != connections.end()) {
-
-      s1 = it->first.lock();
-      s2 = it->second.lock();
-
-      if(not s1 or not s2) {
-	it = connections.erase(it);
-      }
-      else {
-	it++;
-      }
-    }
-  }
+  void add(const std::shared_ptr<Star>& s1, const std::shared_ptr<Star>& s2);
+  void draw(float offx, float offy);
+  std::vector<std::weak_ptr<Star>> pathfind(const std::shared_ptr<Star>& from, const std::shared_ptr<Star>& to) const;
 };
 
 /*
@@ -239,6 +214,7 @@ struct Fleet {
   std::weak_ptr<Observer> owner;
 
   std::vector<FleetTrace> trace;
+  std::vector<std::weak_ptr<Star>> path; // the path we're on
 
   const char *name;
 
@@ -255,6 +231,7 @@ struct Fleet {
     trace = other->trace;
     name = other->name;
     owner = other->owner;
+    path = other->path;
   }
 
   Fleet(const char *_name, std::shared_ptr<Star> s, std::weak_ptr<Observer> _owner) {
@@ -309,7 +286,7 @@ struct Fleet {
     }
   }
 
-  void move_to(std::shared_ptr<Star>& d);
+  void move_to(const StarGraph &g, std::shared_ptr<Star>& d);
   void update();
 };
 
@@ -565,15 +542,18 @@ struct Observations {
     std::shared_ptr<Fleet> ret;
     for(auto&& fleet : fleets.fleets) {
       if(fleet->id == event.fleet1->id) {
-	if(fleet->moving == false and fleet->destination == event.orderTarget and fleet->source == event.orderTarget) {
-	  return fleet;
-	}
+	if(fleet->moving == false and
+	   fleet->destination->id == event.orderTarget->id and
+	   fleet->source->id == event.orderTarget->id)
+	  {
+	    return fleet;
+	  }
       }
     }
     return NULL;
   }
 
-  bool processOrder(Fleets& fleets, ObservableEvent& event, Observer& observer) {
+  bool processOrder(const StarGraph& g, Fleets& fleets, ObservableEvent& event, Observer& observer) {
     if(not orderReachedDestination(event)) {
       return false;
     }
@@ -585,7 +565,7 @@ struct Observations {
 
     if(f) {
       printf("%s received order to move to %s\n", f->name, event.orderMoveTo->name);
-      f->move_to(event.orderMoveTo);
+      f->move_to(g, event.orderMoveTo);
       addFleetDeparture(f);
     }
     else {
@@ -706,7 +686,7 @@ struct Observations {
     return true;
   }
 
-  void update(Fleets& fleets, MessageLog& log) {
+  void update(const StarGraph& graph, Fleets& fleets, MessageLog& log) {
     std::vector<ObservableEvent>::iterator it = events.begin();
 
     while(it != events.end()) {
@@ -720,7 +700,7 @@ struct Observations {
 	case ObservableEventType::OrderFleetMove:
 	  {
 	    // orders are erased when they reach the target star
-	    erase_event = processOrder(fleets, event, *human_controller);
+	    erase_event = processOrder(graph, fleets, event, *human_controller);
 	  };
 	  break;
 
@@ -808,7 +788,15 @@ struct Stars {
   }
 
   void connect(const char *name1, const char *name2) {
-    graph.connections.emplace_back(std::make_pair(from_name(name1), from_name(name2)));
+    graph.add(from_name(name1), from_name(name2));
+  }
+
+  void rebuild_indexes() {
+    int i = 0;
+    for(auto&& star : stars) {
+      star->index = i;
+      i++;
+    }
   }
 
   void init() {
@@ -825,6 +813,7 @@ struct Stars {
     add("Alpha Centauri", -60, 130);
     add("Ross 154", -130, 240);
     add("Cygni", -70, -50);
+    rebuild_indexes();
 
     std::shared_ptr<Star> sol = from_name("Sol");
     std::shared_ptr<Star> procyon = from_name("Procyon");
@@ -835,6 +824,7 @@ struct Stars {
     std::shared_ptr<Star> ross154 = from_name("Ross 154");
     std::shared_ptr<Star> cygni = from_name("Cygni");
 
+    graph.s = this;
     graph.add(sol, tauceti);
     graph.add(tauceti, lalande);
     graph.add(tauceti, epsiloneridani);
@@ -846,6 +836,11 @@ struct Stars {
     graph.add(alphacentauri, lalande);
     graph.add(sol, lalande);
     graph.add(sol, cygni);
+
+    auto path = graph.pathfind(epsiloneridani, ross154);
+    for(auto&& next : path) {
+      printf("-> %s\n", next.lock()->name);
+    }
   }
 
   void draw(float vx, float vy, const Observer& o) {
@@ -870,6 +865,68 @@ struct Stars {
     }
   }
 };
+
+void StarGraph::add(const std::shared_ptr<Star>& s1, const std::shared_ptr<Star>& s2) {
+  s1->neighbors.emplace_back(s2);
+  s2->neighbors.emplace_back(s1);
+}
+
+void StarGraph::draw(float offx, float offy) {
+  for(auto&& star : s->stars) {
+    for(auto&& neighbor : star->neighbors) {
+      if(auto n = neighbor.lock()) {
+	al_draw_line(star->x - offx, star->y - offy, n->x - offx, n->y - offy, al_map_rgb(200,200,200), 2);
+      }
+    }
+  }
+}
+
+std::vector<std::weak_ptr<Star>> StarGraph::pathfind(const std::shared_ptr<Star>& from, const std::shared_ptr<Star>& to) const {
+  struct bfsdata {
+    std::weak_ptr<Star> parent;
+  };
+
+  std::vector<bfsdata> data(s->stars.size());
+
+  std::deque<std::weak_ptr<Star>> q;
+  q.emplace_back(from);
+
+  while(not q.empty()) {
+    std::weak_ptr<Star> cur_ = q.front();
+    auto cur = cur_.lock();
+    if(not cur) { continue; }
+
+    q.pop_front();
+
+    for(auto&& neighbor_ : cur->neighbors) {
+      auto neighbor = neighbor_.lock();
+      if(not neighbor) { continue; }
+      bool not_visited = not data[neighbor->index].parent.lock();
+
+      if(not_visited == true) {
+	data[neighbor->index].parent = cur;
+	q.push_back(neighbor);
+      }
+    }
+  }
+
+  if(not data[to->index].parent.lock()) { return {}; } // no path
+
+  std::vector<std::weak_ptr<Star>> ret;
+  std::shared_ptr<Star> cur = to;
+
+  while(cur->id != from->id) {
+    ret.push_back(cur);
+    std::weak_ptr<Star> cur_ = data[cur->index].parent;
+    cur = cur_.lock();
+    if(not cur) { return {}; }
+  }
+
+  ret.push_back(from);
+  reverse(ret.begin(), ret.end());
+
+  return ret;
+}
 
 void switch_to_menu();
 
@@ -1017,19 +1074,18 @@ struct Game {
     log.year = t;
     obs.tick_events_created = 0;
     fleets.update(obs, *this);
-    obs.update(fleets, log);
+    obs.update(stars.graph, fleets, log);
     stars.update();
-    stars.graph.prune();
   }
 
   void fleetArrived(std::shared_ptr<Fleet>& arrived)
   {
     std::vector<std::shared_ptr<Fleet>>::iterator it = fleets.fleets.begin();
     while(it != fleets.fleets.end()) {
-      bool encounter = (*it)->t == 0 && arrived->id != (*it)->id && (*it)->source == arrived->source;
+      bool encounter = (*it)->t == 0 and arrived->id != (*it)->id and (*it)->source->id == arrived->source->id;
 
       if(encounter == true) {
-	// hmm
+	// TODO hmm
 	bool is_enemy = (*it)->owner.lock()->id != arrived->owner.lock()->id;
 
 	if(is_enemy == true) {
@@ -1199,7 +1255,9 @@ struct Game {
       ImGui::End();
     }
 
-    // fleets.draw(vx, vy);
+    // for(auto&& fleet : fleets.fleets) {
+    //   fleet->draw(vx, vy);
+    // }
     obs.draw(vx, vy, show_event_circles);
   }
 };
@@ -1224,6 +1282,7 @@ float distance_to_star(const Observer& o, const Star& s) {
 void Fleets::update(Observations& obs, Game& g) {
   std::vector<std::weak_ptr<Fleet>> arrived_fleets;
 
+  // move fleets
   for(auto&& fleet : fleets) {
     fleet->update();
 
@@ -1234,9 +1293,29 @@ void Fleets::update(Observations& obs, Game& g) {
     }
   }
 
+  // process combat
   for(auto&& fleet : arrived_fleets) {
     if(auto f = fleet.lock()) {
       g.fleetArrived(f);
+    }
+  }
+
+  // move surviving ships on paths
+  for(auto&& fleet : fleets) {
+    if(fleet->moving == false) {
+      if(not fleet->path.empty()) {
+	if(fleet->path.size() == 1) { // it is what it is
+	  fleet->path.clear();
+	  fleet->source = fleet->destination;
+	  fleet->t = 0;
+	  continue;
+	}
+
+	if(auto next = fleet->path.front().lock()) {
+	  fleet->move_to(g.stars.graph, next);
+	  obs.addFleetDeparture(fleet);
+	}
+      }
     }
   }
 
@@ -1249,8 +1328,42 @@ void Fleets::update(Observations& obs, Game& g) {
   }
 }
 
-void Fleet::move_to(std::shared_ptr<Star>& d) {
-  destination = d;
+void Fleet::move_to(const StarGraph& g, std::shared_ptr<Star>& d) {
+  // check if d is a neighbor of the fleet's star
+  bool direct = false;
+  for(auto&& neighbor : source->neighbors) {
+    if(auto n = neighbor.lock()) {
+      if(n->id == d->id) { direct = true; }
+    }
+  }
+
+  if(direct == false) {
+    if(path.empty()) {
+      path = g.pathfind(source, d);
+    }
+    printf("*** path:");
+    for(auto&& p : path) printf(" %s", p.lock()->name);
+    puts("\n");
+
+    if(path.empty()) {
+      printf("Fail whale: Couldn't find path from %s to %s\n", source->name, d->name);
+      return;
+    }
+
+    path.erase(path.begin());
+    if(auto dest = path.front().lock()) {
+      source = destination;
+      destination = dest;
+      printf("%s -> %s\n\n", source->name, destination->name);
+    }
+    else {
+      exit(1);
+    }
+  }
+  else {
+    destination = d;
+  }
+
   distance =
     sqrt((source->x - destination->x) * (source->x - destination->x) +
 	 (source->y - destination->y) * (source->y - destination->y));
@@ -1275,6 +1388,7 @@ void Fleet::update() {
     y = source->y;
     trace.clear();
     moving = false;
+
   }
   else {
     x = lerp(source->x, destination->x, t);
@@ -1298,6 +1412,10 @@ static void show_debug_window(Engine& e, Game& g) {
     ImGui::Text("Stars: %ld", g.stars.stars.size());
     ImGui::Text("Fleets: %ld", g.fleets.fleets.size());
     ImGui::Text("Observers: %ld", g.obs.observers.size());
+
+    ImGui::Text("%s :: %s",
+		g.fleets.fleets.front()->source->name,
+		g.fleets.fleets.front()->destination->name);
 
     int i = 0;
 
